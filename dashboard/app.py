@@ -12,18 +12,30 @@ Offline Streamlit dashboard for exploring:
 No external APIs or network services are used.
 """
 
+import json
+import sys
 from pathlib import Path
+
+# -------------------------------------------------------------------
+# Project root / local package path
+# -------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+from security.case_package import verify_case_package
 
 
 # -------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
@@ -47,7 +59,9 @@ GRAPH_EDGES_FILE = (
     PROCESSED_DIR / "graph_edges.csv"
 )
 
-
+CASES_DIR = (
+    PROJECT_ROOT / "data" / "cases"
+)
 # -------------------------------------------------------------------
 # Page configuration
 # -------------------------------------------------------------------
@@ -107,6 +121,55 @@ def load_all_data():
     graph_edges_df,
 ) = load_all_data()
 
+def find_case_for_txid(txid):
+    """
+    Find the local offline case package associated with a TXID.
+
+    Returns
+    -------
+    Path | None
+        Matching case directory, or None when no case exists.
+    """
+
+    if not CASES_DIR.is_dir():
+        return None
+
+    txid = str(txid).strip()
+
+    for case_directory in sorted(
+        CASES_DIR.iterdir()
+    ):
+
+        if not case_directory.is_dir():
+            continue
+
+        evidence_file = (
+            case_directory / "evidence.json"
+        )
+
+        if not evidence_file.is_file():
+            continue
+
+        try:
+            evidence = json.loads(
+                evidence_file.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            OSError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ):
+            continue
+
+        if str(
+            evidence.get("txid", "")
+        ).strip() == txid:
+
+            return case_directory
+
+    return None
 
 # -------------------------------------------------------------------
 # Header
@@ -332,7 +395,7 @@ with risk_col1:
 
     st.plotly_chart(
         fig_risk,
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -358,7 +421,7 @@ with risk_col2:
 
     st.plotly_chart(
         fig_priority,
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -395,7 +458,7 @@ top_records = (
 
 st.dataframe(
     top_records,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -529,7 +592,7 @@ signal_data = pd.DataFrame(
 
 st.dataframe(
     signal_data,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -561,7 +624,7 @@ fig_clusters = px.bar(
 
 st.plotly_chart(
     fig_clusters,
-    use_container_width=True,
+    width="stretch",
 )
 
 selected_cluster = selected_record.get(
@@ -667,8 +730,196 @@ if (
             selected_graph_nodes[
                 available_graph_columns
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
+        )
+
+
+# -------------------------------------------------------------------
+# PQC evidence security
+# -------------------------------------------------------------------
+
+st.header("PQC Evidence Security")
+
+selected_case = find_case_for_txid(
+    selected_txid
+)
+
+if selected_case is None:
+
+    st.info(
+        "No offline signed case package exists "
+        "for the selected transaction."
+    )
+
+else:
+
+    evidence_file = (
+        selected_case / "evidence.json"
+    )
+
+    signature_file = (
+        selected_case / "signature.bin"
+    )
+
+    report_file = (
+        selected_case / "report.json"
+    )
+
+    graph_file = (
+        selected_case
+        / "transaction_graph.json"
+    )
+
+    st.write(
+        f"**Case:** `{selected_case.name}`"
+    )
+
+    try:
+
+        verification = verify_case_package(
+            selected_case
+        )
+
+        status_col1, status_col2, status_col3 = (
+            st.columns(3)
+        )
+
+        with status_col1:
+
+            st.metric(
+                "Evidence Generated",
+                "YES"
+                if evidence_file.is_file()
+                else "NO",
+            )
+
+        with status_col2:
+
+            st.metric(
+                "PQC Signature",
+                "CREATED"
+                if signature_file.is_file()
+                else "MISSING",
+            )
+
+        with status_col3:
+
+            st.metric(
+                "Verification",
+                verification["status"],
+            )
+
+        st.subheader(
+            "Evidence Integrity"
+        )
+
+        integrity_col1, integrity_col2 = (
+            st.columns(2)
+        )
+
+        with integrity_col1:
+
+            if verification[
+                "pqc_signature_valid"
+            ]:
+
+                st.success(
+                    "✓ PQC signature verified"
+                )
+
+            else:
+
+                st.error(
+                    "✗ PQC signature verification failed"
+                )
+
+        with integrity_col2:
+
+            if verification[
+                "report_integrity_valid"
+            ]:
+
+                st.success(
+                    "✓ report.json integrity verified"
+                )
+
+            else:
+
+                st.error(
+                    "✗ report.json was modified"
+                )
+
+        graph_status = (
+            verification[
+                "transaction_graph_integrity_valid"
+            ]
+        )
+
+        if graph_status:
+
+            st.success(
+                "✓ transaction_graph.json integrity verified"
+            )
+
+        else:
+
+            st.error(
+                "✗ transaction_graph.json was modified"
+            )
+
+        artifact_modified = not (
+            verification[
+                "report_integrity_valid"
+            ]
+            and verification[
+                "transaction_graph_integrity_valid"
+            ]
+        )
+
+        st.subheader(
+            "Case Security Status"
+        )
+
+        if verification["valid"]:
+
+            st.success(
+                "Evidence Status: VALID"
+            )
+
+            st.success(
+                "Modified since signing: NO"
+            )
+
+        else:
+
+            st.error(
+                "Evidence Status: INVALID"
+            )
+
+            if artifact_modified:
+
+                st.error(
+                    "Modified since signing: YES"
+                )
+
+            else:
+
+                st.warning(
+                    "Package verification failed, "
+                    "but no report/graph modification was detected."
+                )
+
+        st.caption(
+            "Verification is performed locally using "
+            "the stored case evidence, ML-DSA-65 signature, "
+            "and local public key."
+        )
+
+    except Exception as exc:
+
+        st.error(
+            f"Case verification failed: {exc}"
         )
 
 
